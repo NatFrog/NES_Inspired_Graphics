@@ -1,0 +1,73 @@
+//`ifndef HVSYNC_GENERATOR_H
+//`define HVSYNC_GENERATOR_H
+			  
+	/* VGA CLK running at 25.175 MHz +/- 0.5%
+	•Sync (a) = 95.67 ≈ 96
+	•Back Porch (b) = 47.83 ≈ 48
+	•Display Int (c) = 639.45 ≈ 640
+	•Front Porch (d) = 15.11 ≈ 16
+	•Total = 800
+	*/
+	
+// VGA controller for 640x480 screen
+module vga_controller (clk, reset, hsync, vsync, bright, hCount, vCount);
+
+  input clk;
+  input reset;
+  output reg hsync, vsync;
+  output bright;
+  output reg [9:0] hCount;
+  output reg [9:0] vCount;
+  
+
+  // declarations for sync parameters for 640x480 display 
+  // horizontal constants
+  parameter H_DISPLAY       = 640; // horizontal display width
+  parameter H_BACK          =  48; // horizontal left border (back porch)
+  parameter H_FRONT         =  16; // horizontal right border (front porch)
+  parameter H_SYNC          =  96; // horizontal sync width
+  
+  // vertical constants
+  parameter V_DISPLAY       = 480; // vertical display height
+  parameter V_TOP           =  33; // vertical top border
+  parameter V_BOTTOM        =  10; // vertical bottom border
+  parameter V_SYNC          =   2; // vertical sync # lines
+  
+  // derived constants
+  parameter H_SYNC_START    = H_DISPLAY + H_FRONT;
+  parameter H_SYNC_END      = H_DISPLAY + H_FRONT + H_SYNC - 1;
+  parameter H_MAX           = H_DISPLAY + H_BACK + H_FRONT + H_SYNC - 1;
+  parameter V_SYNC_START    = V_DISPLAY + V_BOTTOM;
+  parameter V_SYNC_END      = V_DISPLAY + V_BOTTOM + V_SYNC - 1;
+  parameter V_MAX           = V_DISPLAY + V_TOP + V_BOTTOM + V_SYNC - 1;
+
+  wire hmaxxed = (hCount == H_MAX) || reset;	// set when hCount is maximum
+  wire vmaxxed = (vCount == V_MAX) || reset;	// set when vCount is maximum
+  
+  // horizontal position counter
+  always @(posedge clk)
+  begin
+    hsync <= (hCount>=H_SYNC_START && hCount<=H_SYNC_END);
+    if(hmaxxed)
+      hCount <= 0;
+    else
+      hCount <= hCount + 1;
+  end
+
+  // vertical position counter
+  always @(posedge clk)
+  begin
+    vsync <= (vCount>=V_SYNC_START && vCount<=V_SYNC_END);
+    if(hmaxxed)
+      if (vmaxxed)
+        vCount <= 0;
+      else
+        vCount <= vCount + 1;
+  end
+  
+  // bright is set when beam is in "safe" visible frame
+  assign bright = (hCount<H_DISPLAY) && (vCount<V_DISPLAY);
+
+endmodule
+
+//`endif

@@ -1,0 +1,51 @@
+module clock_generators (
+    input clk_50,   // 50 MHz input clock
+    output clk_25,   // 25 MHz output
+    output clk_5,    // 5 MHz output
+    output clk_2     // 2 MHz output
+);
+
+    // Internal counters
+    reg [2:0] count_5;   // 3 bits is enough to count to 10
+    reg [4:0] count_2;   // 5 bits is enough to count to 25
+    reg clk_25_reg, clk_5_reg, clk_2_reg;
+	 
+    initial begin
+        clk_25_reg = 0;
+        clk_5_reg  = 0;
+        clk_2_reg  = 0;
+        count_5 = 0;
+        count_2 = 0;
+    end
+
+    // Divide-by-2 for 25 MHz (simple toggle)
+    always @(posedge clk_50) begin
+        clk_25_reg <= ~clk_25_reg;
+    end
+
+    // Divide-by-10 for 5 MHz
+    always @(posedge clk_50) begin
+        if (count_5 == 4) begin
+            clk_5_reg <= ~clk_5_reg;
+            count_5 <= 0;
+        end else begin
+            count_5 <= count_5 + 1;
+        end
+    end
+
+    // Divide-by-25 for 2 MHz
+    always @(posedge clk_50) begin
+        if (count_2 == 12) begin
+            clk_2_reg <= ~clk_2_reg;
+            count_2 <= 0;
+        end else begin
+            count_2 <= count_2 + 1;
+        end
+    end
+
+    // Assign outputs
+    assign clk_25 = clk_25_reg;
+    assign clk_5 = clk_5_reg;
+    assign clk_2 = clk_2_reg;
+
+endmodule

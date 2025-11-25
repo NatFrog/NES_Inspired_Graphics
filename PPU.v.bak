@@ -1,0 +1,353 @@
+/*
+ * NES Picture Processing Unit (PPU)
+ * What needs to be added to make sure it can interface with VGA?
+ *Clock timing...
+ */
+
+module PPU (
+    input  wire        clk,            // PPU system clock
+    input  wire        rst,            // Active-low reset
+    input  wire [7:0]  CPUdata_in,     // Data from CPU bus (write)
+    input  wire [2:0]  address,        // PPU register select
+    input  wire [7:0]  PPUram_data_in, // Data from PPU RAM
+    input  wire        rw,             // 0 = read, 1 = write (CPU->PPU)
+    output wire        frame_end,
+    output wire        frame_start,
+    output wire        rendering,
+    output wire [7:0]  color,          // Final color output
+    output reg  [13:0] PPUram_addr_out,
+    output reg         PPUram_rw_sel,
+    output reg  [7:0]  PPUram_data_out,
+    output reg  [7:0]  PPUram_q,
+    output wire [7:0]  CPUdata_out,    // Corrected: output data bus to CPU
+
+    // Debug RGB
+    output wire [7:0]  red,
+    output wire [7:0]  green,
+    output wire [7:0]  blue
+);
+
+    // --- Parameters ---
+    parameter READ  = 1'b0;
+    parameter WRITE = 1'b1;
+
+    // --- CPU-visible registers ---
+    reg [7:0] PPUCTRL,   PPUCTRL_D;
+    reg [7:0] PPUMASK,   PPUMASK_D;
+    reg [7:0] PPUSTATUS, PPUSTATUS_D;
+    reg [7:0] OAMADDR,   OAMADDR_D;
+    reg [7:0] OAMDATA,   OAMDATA_D;
+    reg [7:0] PPUSCROLL, PPUSCROLL_D;
+    reg [7:0] PPUADDR,   PPUADDR_D;
+    reg [7:0] PPUDATA,   PPUDATA_D;
+    reg [7:0] OAMDMA,    OAMDMA_D;
+
+    reg [7:0] data_out, data_out_d;
+    reg cpu_PPUram_read, cpu_PPUram_read_d;
+    reg cpu_oam_read,    cpu_oam_read_d;
+
+    // Loopy scroll registers
+    reg [14:0] loopy_t, loopy_t_d;
+    wire [14:0] loopy_v;
+    reg [2:0] fine_x_scroll, fine_x_scroll_d;
+    reg w, w_d;
+    reg update_loopy_v, update_loopy_v_d;
+    reg cpu_loopy_v_inc;
+
+    // --- Control wires decoded from registers ---
+    wire [1:0] base_nt_addr;
+    wire       PPUram_addr_inc;
+    wire       spr_pt_sel, bg_pt_sel, spr_size_sel, ppu_ms_sel, vblank_nmi_gen;
+    wire       use_grayscale, show_bg_left_col, show_spr_left_col;
+    wire       bg_render_en, spr_render_en;
+    wire       red_bg_color, green_bg_color, blue_bg_color;
+
+    // --- Status bits ---
+    wire spr_overflow, spr_zero_hit, vblank_status;
+    wire [4:0] coarse_x_scroll, coarse_y_scroll;
+    wire [2:0] fine_y_scroll;
+
+    // Scanline + pixel counters
+    reg [8:0] scanline_count;
+    reg [8:0] pixel_count;
+
+    // --- Background, Sprite, and Palette wiring ---
+    wire [3:0] bg_pal_out, spr_pal_out;
+    wire [13:0] bg_PPUram_addr, spr_PPUram_addr;
+    wire [7:0] bg_red, bg_green, bg_blue;
+    wire [7:0] spr_red, spr_green, spr_blue;
+    wire spr_PPUram_req, spr_pri_out, spr_active, spr_0_rendering, bg_active;
+    wire [4:0] pal_addr;
+    reg [7:0] palette_data_in;
+    reg palette_mem_rw;
+    wire palette_mem_en;
+    reg cpu_pal_req;
+    wire [7:0] pal_color_out;
+    wire [7:0] pal_red, pal_green, pal_blue;
+
+    // --- Internal control ---
+    reg cpu_PPUram_req;
+    reg cpu_oam_req;
+    reg oam_rw_en;
+    reg ppustatus_vblank;
+    reg clear_vblank_read, clear_vblank;
+    wire set_vblank;
+    reg ppustatus_spr_0_hit;
+    wire set_spr_0_hit, clear_spr_0_hit;
+    reg ppustatus_spr_overflow;
+    wire set_spr_overflow, clear_spr_overflow;
+
+    // --- Submodules ---
+    PPU_background bg (
+        .clk(clk), .rst(rst),
+        .bg_render_en(bg_render_en),
+        .x_pos(pixel_count), .y_pos(scanline_count),
+        .PPUram_data_in(PPUram_data_in),
+        .bg_pt_sel(bg_pt_sel),
+        .show_bg_left_col(show_bg_left_col),
+        .fine_x_scroll(fine_x_scroll),
+        .coarse_x_scroll(coarse_x_scroll),
+        .fine_y_scroll(fine_y_scroll),
+        .coarse_y_scroll(coarse_y_scroll),
+        .nametable_sel(base_nt_addr),
+        .update_loopy_v(update_loopy_v),
+        .cpu_loopy_v_inc(cpu_loopy_v_inc),
+        .cpu_loopy_v_inc_amt(PPUram_addr_inc),
+        .vblank_out(vblank_status),
+        .bg_rendering_out(bg_active),
+        .bg_pal_sel(bg_pal_out),
+        .loopy_v_out(loopy_v),
+        .PPUram_addr_out(bg_PPUram_addr),
+        .red(bg_red), .green(bg_green), .blue(bg_blue)
+    );
+
+    PPU_sprite spr (
+        .clk(clk), .rst(rst),
+        .spr_render_en(spr_render_en),
+        .x_coord(pixel_count),
+        .y_coord(scanline_count),
+        .spr_addr_in(OAMADDR),
+        .spr_data_in(OAMDATA_D),
+        .PPUram_data_in(PPUram_data_in),
+        .cpu_oam_rw(oam_rw_en),
+        .cpu_oam_req(cpu_oam_req),
+        .spr_pt_sel(spr_pt_sel),
+        .spr_size_sel(spr_size_sel),
+        .show_spr_left_col(show_spr_left_col),
+        .spr_overflow(set_spr_overflow),
+        .spr_pri_out(spr_pri_out),
+        .spr_data_out(), // OAM out not used directly here
+        .spr_pal_sel(spr_pal_out),
+        .PPUram_addr_out(spr_PPUram_addr),
+        .spr_PPUram_req(spr_PPUram_req),
+        .spr_0_rendering(spr_0_rendering),
+        .red(spr_red), .green(spr_green), .blue(spr_blue),
+        .spr_rendering_out(spr_active)
+    );
+
+    PPU_palette_mem pal_mem (
+        .clk(clk), .rst(rst),
+        .pal_addr(pal_addr),
+        .palette_data_in(palette_data_in),
+        .palette_mem_rw(palette_mem_rw),
+        .palette_mem_en(palette_mem_en),
+        .color_out(pal_color_out),
+        .red(pal_red), .green(pal_green), .blue(pal_blue)
+    );
+
+    // --- Sequential register update ---
+    always @(posedge clk or negedge rst) begin
+        if (!rst) begin
+            PPUCTRL <= 0; PPUMASK <= 0; PPUSTATUS <= 0;
+            OAMADDR <= 0; OAMDATA <= 0; PPUSCROLL <= 0;
+            PPUADDR <= 0; PPUDATA <= 0; OAMDMA <= 0;
+            loopy_t <= 0; fine_x_scroll <= 0; w <= 0;
+            update_loopy_v <= 0; data_out <= 0;
+            cpu_PPUram_read <= 0; cpu_oam_read <= 0;
+        end else begin
+            PPUCTRL <= PPUCTRL_D; PPUMASK <= PPUMASK_D;
+            PPUSTATUS <= PPUSTATUS_D; OAMADDR <= OAMADDR_D;
+            OAMDATA <= OAMDATA_D; PPUSCROLL <= PPUSCROLL_D;
+            PPUADDR <= PPUADDR_D; PPUDATA <= PPUDATA_D;
+            OAMDMA <= OAMDMA_D; loopy_t <= loopy_t_d;
+            fine_x_scroll <= fine_x_scroll_d; w <= w_d;
+            update_loopy_v <= update_loopy_v_d; data_out <= data_out_d;
+            cpu_PPUram_read <= cpu_PPUram_read_d;
+            cpu_oam_read <= cpu_oam_read_d;
+        end
+    end
+
+    // --- PPU register read/write decoding (fixed data vs CPUdata_in) ---
+    always @* begin
+        // default next-state assignments
+        PPUCTRL_D = PPUCTRL;
+        PPUMASK_D = PPUMASK;
+        PPUSTATUS_D = PPUSTATUS;
+        OAMADDR_D = OAMADDR;
+        OAMDATA_D = OAMDATA;
+        PPUSCROLL_D = PPUSCROLL;
+        PPUADDR_D = PPUADDR;
+        PPUDATA_D = PPUDATA;
+        OAMDMA_D = OAMDMA;
+        loopy_t_d = loopy_t;
+        fine_x_scroll_d = fine_x_scroll;
+        w_d = w;
+        data_out_d = data_out;
+        update_loopy_v_d = 1'b0;
+        PPUram_rw_sel = 0;
+        cpu_PPUram_req = 0;
+        cpu_PPUram_read_d = 0;
+        cpu_pal_req = 0;
+        palette_mem_rw = 0;
+        palette_data_in = 8'h00;
+        PPUram_data_out = 8'h00;
+        cpu_oam_read_d = 0;
+        oam_rw_en = 0;
+        cpu_oam_req = 0;
+        clear_vblank_read = 0;
+        cpu_loopy_v_inc = 0;
+
+        if (rw == WRITE) begin
+            case (address)
+                3'h0: begin
+                    PPUCTRL_D = CPUdata_in;
+                    loopy_t_d[11:10] = CPUdata_in[1:0];
+                end
+                3'h1: PPUMASK_D = CPUdata_in;
+                3'h3: OAMADDR_D = CPUdata_in;
+                3'h4: begin
+                    OAMDATA_D = CPUdata_in;
+                    OAMADDR_D = OAMADDR + 1;
+                    cpu_oam_req = 1;
+                end
+                3'h5: begin
+                    w_d = !w;
+                    if (!w)
+                        {loopy_t_d[4:0], fine_x_scroll_d} = {CPUdata_in[7:3], CPUdata_in[2:0]};
+                    else
+                        {loopy_t_d[14:12], loopy_t_d[9:5]} = {CPUdata_in[2:0], CPUdata_in[7:3]};
+                end
+                3'h6: begin
+                    w_d = !w;
+                    if (!w)
+                        {loopy_t_d[14], loopy_t_d[13:8]} = {1'b0, CPUdata_in[5:0]};
+                    else begin
+                        loopy_t_d[7:0] = CPUdata_in;
+                        update_loopy_v_d = 1;
+                    end
+                end
+                3'h7: begin
+                    cpu_loopy_v_inc = 1;
+                    if (loopy_v[13:0] < 14'h3f00) begin
+                        cpu_PPUram_req = 1;
+                        PPUram_rw_sel = 1;
+                        PPUram_data_out = CPUdata_in;
+                    end else begin
+                        cpu_pal_req = 1;
+                        palette_mem_rw = 1;
+                        palette_data_in = CPUdata_in;
+                    end
+                end
+            endcase
+        end else begin // READ
+            case (address)
+                3'h2: begin
+                    data_out_d = {ppustatus_vblank, ppustatus_spr_0_hit,
+                                  ppustatus_spr_overflow, 5'b00000};
+                    clear_vblank_read = 1;
+                    w_d = 0;
+                end
+                3'h4: begin
+                    data_out_d = (vblank_status || (!spr_render_en && !bg_render_en)) ? OAMDATA : 8'hff;
+                    cpu_oam_read_d = 1;
+                end
+                3'h7: begin
+                    cpu_loopy_v_inc = 1;
+                    if (loopy_v[13:0] < 14'h3f00) begin
+                        data_out_d = PPUDATA;
+                        cpu_PPUram_req = 1;
+                        cpu_PPUram_read_d = 1;
+                    end else begin
+                        cpu_pal_req = 1;
+                        data_out_d = pal_color_out;
+                        PPUDATA_D = pal_color_out;
+                    end
+                end
+                default: data_out_d = 8'h00;
+            endcase
+        end
+
+        if (cpu_PPUram_read)
+            PPUDATA_D = PPUram_data_in;
+    end
+
+    assign CPUdata_out = (rw == READ) ? data_out : 8'hZZ;
+
+    // --- Control bit decoding ---
+    assign PPUram_addr_inc = PPUCTRL[2];
+    assign spr_pt_sel      = PPUCTRL[3];
+    assign bg_pt_sel       = PPUCTRL[4];
+    assign spr_size_sel    = PPUCTRL[5];
+    assign ppu_ms_sel      = PPUCTRL[6];
+    assign vblank_nmi_gen  = PPUCTRL[7];
+
+    assign use_grayscale     = PPUMASK[0];
+    assign show_bg_left_col  = PPUMASK[1];
+    assign show_spr_left_col = PPUMASK[2];
+    assign bg_render_en      = PPUMASK[3];
+    assign spr_render_en     = PPUMASK[4];
+    assign red_bg_color      = PPUMASK[5];
+    assign green_bg_color    = PPUMASK[6];
+    assign blue_bg_color     = PPUMASK[7];
+
+    assign coarse_x_scroll = loopy_t[4:0];
+    assign coarse_y_scroll = loopy_t[9:5];
+    assign base_nt_addr    = loopy_t[11:10];
+    assign fine_y_scroll   = loopy_t[14:12];
+
+    assign PPUram_addr_out =
+        (cpu_PPUram_req && (vblank_status || (!bg_render_en && !spr_render_en))) ? loopy_v[13:0] :
+        (spr_PPUram_req ? spr_PPUram_addr : bg_PPUram_addr);
+
+    // Palette & rendering
+    assign pal_addr =
+        (cpu_pal_req && (vblank_status || (!bg_render_en && !spr_render_en))) ? loopy_v[4:0] :
+        (!spr_pri_out && spr_pal_out[1:0] != 0) ? {1'b1, spr_pal_out} :
+        (spr_pal_out[1:0] == 0 && bg_pal_out[1:0] != 0) ? {1'b0, bg_pal_out} :
+        (bg_pal_out[1:0] == 0 && spr_pal_out[1:0] != 0) ? {1'b1, spr_pal_out} :
+        {1'b0, bg_pal_out};
+
+    assign palette_mem_en = cpu_pal_req || bg_active;
+    assign color = pal_color_out;
+
+    assign rendering = bg_active;
+    assign red = pal_red;
+    assign green = pal_green;
+    assign blue = pal_blue;
+
+    // Frame timing
+    assign frame_end   = (scanline_count == 240) && (pixel_count == 256);
+    assign frame_start = (scanline_count == 0) && (pixel_count == 0);
+    assign set_vblank  = (scanline_count == 241) && (pixel_count == 0);
+    assign clear_vblank = (scanline_count == 9'hfff) && (pixel_count == 0);
+    assign set_spr_0_hit = spr_0_rendering && (spr_pal_out[1:0] != 0) && (bg_pal_out[1:0] != 0);
+    assign clear_spr_0_hit = (scanline_count == 9'hfff) && (pixel_count == 0);
+    assign clear_spr_overflow = clear_spr_0_hit;
+
+    // --- Pixel & scanline counting ---
+    always @(posedge clk or negedge rst) begin
+        if (!rst) begin
+            scanline_count <= 9'hfff;
+            pixel_count <= 9'h000;
+        end else if (scanline_count == 260 && pixel_count == 340) begin
+            scanline_count <= 9'hfff;
+            pixel_count <= 0;
+        end else if (pixel_count < 340)
+            pixel_count <= pixel_count + 1;
+        else begin
+            pixel_count <= 0;
+            scanline_count <= scanline_count + 1;
+        end
+    end
+
+endmodule
