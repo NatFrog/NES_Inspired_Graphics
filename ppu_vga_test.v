@@ -1,93 +1,118 @@
-
 module ppu_vga_test (
-	input CLOCK_50,      // from Cyclone V
-	input reset,           //button on FPGA
-	//input [7:0] sw,       // 12 bits for color - set by switches on FPGA
-	output hsync, 
-	output vsync,
-	//output [7:0] rgb,     // 12 FPGA pins for RGB(4 per color)
-	output [7:0] red,
-	output [7:0] green,
-	output [7:0] blue,
-	output clock_25,
-	output VGA_BLANK_N
-	);
+    input  CLOCK_50,       // 50 MHz from Cyclone V
+    input  reset,          // ACTIVE-LOW reset button on FPGA
+    output hsync,  
+    output vsync,
+    output [7:0] red,
+    output [7:0] green,
+    output [7:0] blue,
+    output clock_25,
+    output VGA_BLANK_N
+);
 
+    // Treat 'reset' as ACTIVE-LOW everywhere
+    wire reset_n = reset;      // 0 = reset asserted
+    wire reset_h = ~reset_n;   // 1 = reset asserted (active-high)
 
+    wire [9:0] h, v;
+    wire [23:0] color;
 
+    // Clock generators generates clock_25 from CLOCK_50
+    wire ppu_clk_dummy;
+    wire clk_2_dummy;
 
-	//wire reset_btn = reset;  // if reset_btn is active-low
-	wire ppu_clk;
-	wire [9:0] h, v;
-	wire [23:0] color;
-	
-	// Signal Declaration
-	reg [7:0] rgb_reg;    // register for 12-bit RGB DAC 
-	//wire bright;         // Same signal as in controller
-	//wire clock_25;
-
-	 // Clock generators; creating 25MHz VGA input clock
-	 clock_generators clks (.clk_50(CLOCK_50), .clk_25(clock_25), .clk_5(ppu_clk), .clk_2());
+    clock_generators clks (
+        .clk_50(CLOCK_50),
+        .clk_25(clock_25),
+        .clk_5(ppu_clk_dummy),
+        .clk_2(clk_2_dummy)
+    );
   
-    // Instantiate VGA Controller
-    vga_controller vga_c(.clk(clock_25), .reset(~reset), .hSync(hsync), .vSync(vsync),
-                         .bright(VGA_BLANK_N), .hCount(h), .vCount(v));
+    // VGA Controller
+    vga_controller vga_c (
+        .clk(clock_25),
+        .reset(reset_h),       // active-high reset for VGA
+        .hSync(hsync),
+        .vSync(vsync),
+        .bright(VGA_BLANK_N),  // 1 = visible, 0 = blank
+        .hCount(h),
+        .vCount(v)
+    );
 
-		/*
-		ppu test_ppu (
-			 .clk(ppu_clk),
-			 .reset(reset_btn),
-			 .rendering(VGA_BLANK_N),
-			 .cpu_oam_data(32'b0),           // Add default values
-			 .cpu_oam_addr(6'b0),            // Add default values  
-			 .cpu_write(1'b0),
-			 .oam_out(),                     // Leave unconnected if not needed
-			 .PPUCTRL(8'b0),
-			 .hCount(h),
-			 .vCount(v),
-			 .rgb(color)
-		);
-		
-		*/
-		
-		// Hold writes until reset has been low (released) for several clocks
-		reg [7:0] init_cnt;
-		always @(posedge clock_25 or negedge reset) begin
-			 if (!reset)
-				  init_cnt <= 8'd0;
-			 else if (init_cnt != 8'd100)
-				  init_cnt <= init_cnt + 1'b1;
-		end
+    // Fake CPU that moves sprite 0 from top to bottom
+    // Sprite layout in OAM: [X, Y, PatternIndex, PaletteIndex]
+    localparam [7:0] SPR_X     = 8'd100;  // fixed X position
+    // **UPDATE**: Use Tile Index 1
+    localparam [7:0] SPR_TILE  = 8'd5;    
+    // **UPDATE**: Use Palette Index 0
+    localparam [7:0] SPR_PAL   = 8'd1;    
 
-		// Assert write during counts 20–40 after reset is released
-		wire cpu_write_enable = (init_cnt >= 8'd20 && init_cnt <= 8'd40);
+    reg  [7:0] sprite_y;
+    // Counter for slow movement at 50 MHz
+    reg [23:0] move_counter; 
+    localparam [23:0] MOVE_DIVISOR = 24'd1000000; // Move 1 pixel every 1,000,000 cycles (0.02s)
+    reg         cpu_write_r;
+    reg         initialized;
 
-    // Sprite 0 at (100,100), tile 0, palette base 1
-    localparam [31:0] SPRITE0_DATA = 32'h01_00_64_64;
+    // OAM data word: [31:24]=PaletteIndex, [23:16]=PatternIndex, [15:8]=Y, [7:0]=X
+    wire [31:0] cpu_oam_data_word = { SPR_PAL, SPR_TILE, sprite_y, SPR_X };
 
+    // Use CLOCK_50 for the CPU/Control logic
+    always @(posedge CLOCK_50 or negedge reset_n) begin
+        if (!reset_n) begin
+            // ACTIVE-LOW reset: restart animation and clear state
+            sprite_y     <= 8'd0;
+            move_counter <= 24'd0;
+            cpu_write_r  <= 1'b0;
+            initialized  <= 1'b0;
+        end else begin
+            // Default: no write this cycle
+            cpu_write_r <= 1'b0;
+
+            if (!initialized) begin
+                // Initialize state and perform first OAM write
+                initialized <= 1'b1;
+                sprite_y    <= 8'd0;
+                cpu_write_r <= 1'b1;    
+            end else begin
+                // Slow movement
+                move_counter <= move_counter + 1'b1;
+
+                if (move_counter == MOVE_DIVISOR) begin
+                    move_counter <= 24'd0; // Reset counter
+                    
+                    // Move down; max Y to stay visible on 240px screen is 224 (240 - 16)
+                    if (sprite_y < 8'd224) 
+                        sprite_y <= sprite_y + 1'b1;
+                    else
+                        sprite_y <= 8'd0;
+
+                    cpu_write_r <= 1'b1;          // one-cycle write to OAM
+                end
+            end
+        end
+    end
+
+    // PPU instance
     ppu test_ppu (
         .clk(clock_25),
-        .reset(reset),
-        .rendering(VGA_BLANK_N),            // 1 in visible area
+        .reset(reset_n),       // PPU reset is ACTIVE-LOW
+        .rendering(VGA_BLANK_N), // 1 when VGA is in visible area
 
-        .cpu_oam_data(SPRITE0_DATA),
-        .cpu_oam_addr(6'd0),                // sprite index 0
-        .cpu_write(cpu_write_enable),             // single write at startup
+        .cpu_oam_data(cpu_oam_data_word),
+        .cpu_oam_addr(6'd0),   // sprite index 0
+        .cpu_write(cpu_write_r), // one-cycle write strobe
 
-        .oam_out(),
-        .PPUCTRL(8'b0),                     // background palette base 0
+        .oam_out(),            // unused in this test
+        .PPUCTRL(8'b0),        // background palette base 0 (using same base)
         .hCount(h),
         .vCount(v),
         .rgb(color)
     );
 
-    // CPU/OAM interface to be tested still 
+    // RGB output
+    assign red   = VGA_BLANK_N ? color[23:16] : 8'b0;
+    assign green = VGA_BLANK_N ? color[15:8]  : 8'b0;
+    assign blue  = VGA_BLANK_N ? color[7:0]   : 8'b0;
 
-    
-    // Output
-	 assign red = (VGA_BLANK_N) ? color[23:16] : 8'b0; //5'b0, sw[7:5]} : 8'b0;
-	 assign green = (VGA_BLANK_N) ? color[15:8] : 8'b0;//{5'b0, sw[4:2]} : 8'b0;
-	 assign blue = (VGA_BLANK_N) ? color[7:0] : 8'b0; //{6'b0, sw[1:0]} : 8'b0;
-	 
-	 
 endmodule
