@@ -1,21 +1,10 @@
-// ppu.v  -- Background + sprite renderer with 16x16 tiles, 2 planes.
-// plane0 base = 0, plane1 base = 1000 (decimal) in ppu_ram.
-// Each 16-bit word = one 16-pixel row for a single plane.
-//
-// Background:
-//   * nametable in nt_mem (ROM), loaded from ppu_ram_data.hex (offset 2000)
-//   * pattern planes in ppu_ram (plane0 at 0, plane1 at 1000)
-//   * background uses palette port B
-//
-// Sprites:
-//   * OAM format per sprite: [X, Y, PatternIndex, PaletteIndex]
-//   * sprite patterns come from spr_plane0_rom / spr_plane1_rom
-//   * first sprite in OAM that hits wins
-//   * nonzero sprite pattern overrides background color
+// ppu.v -- Background + sprite renderer with 16x16 tiles, 2 planes.
+// -Currently sprites can move and are rendered without stretch.
+// -Background tiles are rendered but look stretched from 20x15 tile resolution
 
 module ppu (
     input  wire        clk,
-    input  wire        reset,          // active-high reset
+    input  wire        reset,          // ACTIVE-LOW reset
     input  wire        rendering,      // 1 = VGA actively rendering
 
     // CPU/OAM interface
@@ -30,14 +19,13 @@ module ppu (
     input  wire [9:0]  hCount,
     input  wire [9:0]  vCount,
 
+    // Declared as 'reg' because it is driven procedurally (in the always block)
     output reg  [23:0] rgb
 );
 
-    // ================================================================
     // PPU pattern RAM (background patterns only)
-    // ================================================================
     reg  [11:0] ram_addr_a, ram_addr_b;
-    wire [15:0] ram_q_a, ram_q_b;
+    wire [15:0] ram_q_a, ram_q_b; // Pattern data from PPU RAM
 
     ppu_ram PPU_RAM (
         .data_a(16'b0),
@@ -51,9 +39,7 @@ module ppu (
         .q_b(ram_q_b)
     );
 
-    // ================================================================
-    // Nametable ROM (separate from ppu_ram, loaded from same hex)
-    // ================================================================
+    // Nametable ROM
     reg [15:0] nt_mem [0:4095];
 
     integer nt_i;
@@ -63,9 +49,7 @@ module ppu (
         $readmemh("ppu_ram_data.hex", nt_mem, 2000);
     end
 
-    // ================================================================
-    // OAM storage (64 sprites × 4 bytes)
-    // ================================================================
+    // OAM storage and CPU interface
     reg  [7:0]  OAM [0:255];
     reg  [31:0] oam_read_data;
     wire [7:0]  cpu_byte_index = { cpu_oam_addr, 2'b00 }; // object index * 4
@@ -74,17 +58,19 @@ module ppu (
 
     integer i;
     always @(posedge clk or negedge reset) begin
-        if (~reset) begin
+        if (!reset) begin
             for (i = 0; i < 256; i = i + 1)
                 OAM[i] <= 8'd0;
             oam_read_data <= 32'h00000000;
         end else begin
-            if (cpu_write && ~rendering) begin
+            // CPU writes OAM
+            if (cpu_write) begin
                 OAM[cpu_byte_index + 0] <= cpu_oam_data[7:0];
                 OAM[cpu_byte_index + 1] <= cpu_oam_data[15:8];
                 OAM[cpu_byte_index + 2] <= cpu_oam_data[23:16];
                 OAM[cpu_byte_index + 3] <= cpu_oam_data[31:24];
             end
+            // OAM Read (combinatorial read of OAM for CPU access)
             oam_read_data <= { OAM[cpu_byte_index+3],
                                OAM[cpu_byte_index+2],
                                OAM[cpu_byte_index+1],
@@ -92,9 +78,7 @@ module ppu (
         end
     end
 
-    // ================================================================
-    // Palette
-    // ================================================================
+    // Palette Interface
     reg  [4:0] back_pal_index;
     reg  [4:0] spr_pal_index;
     wire [23:0] spr_pal_color;
@@ -109,31 +93,23 @@ module ppu (
         .color_out_b(back_pal_color)
     );
 
-    // ================================================================
-    // Coordinate / tile math (320x240 from 640x480)
-    // ================================================================
+    // Coordinate / tile math
     wire [9:0] x2, y2;
     wire [4:0] tile_x, tile_y;
     wire [3:0] pixel_x, pixel_y;
 
     assign x2      = hCount >> 1;
     assign y2      = vCount >> 1;
-    assign tile_x  = x2[8:4];
-    assign tile_y  = y2[8:4];
-    assign pixel_x = x2[3:0];
-    assign pixel_y = y2[3:0];
+    assign tile_x  = x2[8:4];    // 0..19 (320 / 16)
+    assign tile_y  = y2[8:4];    // 0..14 (240 / 16)
+    assign pixel_x = x2[3:0];    // 0..15 (Pixel within tile)
+    assign pixel_y = y2[3:0];    // 0..15 (Row within tile)
 
-    // Nametable address (2 tiles per word)
-    wire [11:0] nt_addr;
-    assign nt_addr = 12'd2000 + (tile_y * 10) + (tile_x >> 1);
-
+    localparam integer ROWS_PER_TILE = 16;
     localparam integer PLANE0_BASE   = 12'd0;
     localparam integer PLANE1_BASE   = 12'd1000;
-    localparam integer ROWS_PER_TILE = 16;
 
-    // ================================================================
     // Sprite pattern ROMs
-    // ================================================================
     reg [15:0] spr_plane0_rom [0:4095];
     reg [15:0] spr_plane1_rom [0:4095];
 
@@ -147,187 +123,187 @@ module ppu (
         $readmemh("plane1.hex", spr_plane1_rom, 0);
     end
 
-    // ================================================================
     // Pipeline registers
-    // ================================================================
-    reg v0, v1, v2, v3;
+    reg v0, v1, v2;
 
-    // Stage 0
+    // Stage 0 -> Latch to S1 inputs
     reg [9:0] s0_x2, s0_y2;
-    reg [4:0] s0_tile_x, s0_tile_y;
     reg [3:0] s0_pixel_x, s0_pixel_y;
+    reg [7:0] s1_tile_index_latch; // Latch for the tile index from NT
 
-    // Stage 1
+    // Stage 1 -> Latch to S2 inputs
     reg [9:0] s1_x2, s1_y2;
-    reg [3:0] s1_pixel_x, s1_pixel_y;
-    reg [7:0] s1_tile_index;
-
-    // Stage 2
-    reg [9:0] s2_x2, s2_y2;
-    reg [3:0] s2_pixel_x;
+    reg [3:0] s1_pixel_x;
     reg       s2_spr_has_color;
 
-    // Stage 3
-    reg       s3_spr_has_color;
-
-    // -------- temporaries declared at module scope (Verilog-2001 style) -----
+    // Stage 2 -> Output latch (The output 'rgb' is already the final latch)
+    
+    // Intermediate Variables
     integer bit_idx_bg;
-    integer si;
-    integer base_idx;
-    integer spr_addr;
-    integer bit_idx_spr;
+    integer spr_addr_rom;
+    integer row_addr_ram;
+    integer bit_idx_spr;        
 
-    reg [15:0] spr_row0, spr_row1;
-    reg [7:0]  spr_x, spr_y, spr_tile;
-    reg [3:0]  spr_row, spr_col;
-    reg [1:0]  spr_pattern_now;
+    reg [1:0] back_pattern_now; // The calculated 2-bit background pattern
+    reg [1:0] spr_pattern_now;  // The calculated 2-bit sprite pattern
     reg        spr_has_color_now;
-    reg [4:0]  spr_pal_base_now;
     reg [4:0]  spr_pal_index_next;
 
-    reg [11:0] nt_addr_s0;
-    reg [15:0] nt_word;
-    reg [7:0]  tile_idx_now;
-    integer    row_addr;
+    reg [7:0]  spr_x, spr_y;
+    reg [3:0]  spr_row, spr_col;
+    
+    reg [15:0] spr_row0;         
+    reg [15:0] spr_row1;         
+    reg [7:0]  spr_pal_base_now; 
 
-    // ================================================================
-    // Main pipeline
-    // ================================================================
+    // Combinatorial Calculation Wires
+    reg [11:0] nt_addr_calc;
+    reg [15:0] nt_word_data;
+    reg [7:0]  tile_idx_calc;
+
+    // **NEW WIRE**: Combinatorial output of the S2 color MUX (Verilog-2001 compatible)
+    wire [23:0] final_color_mux;
+
+
+    // Combinatorial Logic Block (Final Color MUX)
+    // Assigns the final color based on the registered state of Stage 2 (v2 and s2_spr_has_color)
+    assign final_color_mux = v2 ?
+                              // If S2 is valid: use sprite color if non-transparent, else use background color
+                              (s2_spr_has_color ? spr_pal_color : back_pal_color) :
+                              // If S2 is not valid (border/blanking), output black
+                              24'h000000;
+
+
+    // Main Pipeline Logic
+    always @(*) begin // Combinatorial block for address calculations
+        // Nametable address for S0
+        nt_addr_calc = 12'd2000 + (tile_y * 10) + (tile_x >> 1);
+        nt_word_data = nt_mem[nt_addr_calc];
+        
+        // Determine which of the two tile indices in nt_word_data to use
+        if (tile_x[0]) // odd tile_x (right half of word)
+            tile_idx_calc = nt_word_data[15:8];
+        else           // even tile_x (left half of word)
+            tile_idx_calc = nt_word_data[7:0];
+    end
+
     always @(posedge clk or negedge reset) begin
         if (!reset) begin
-            v0 <= 1'b0; v1 <= 1'b0; v2 <= 1'b0; v3 <= 1'b0;
+            v0 <= 1'b0;
+            v1 <= 1'b0;
+            v2 <= 1'b0;
+
+            rgb <= 24'h000000;
 
             ram_addr_a <= 12'd0;
             ram_addr_b <= 12'd0;
 
-            s0_x2 <= 10'd0; s0_y2 <= 10'd0;
-            s0_tile_x <= 5'd0; s0_tile_y <= 5'd0;
-            s0_pixel_x <= 4'd0; s0_pixel_y <= 4'd0;
-
-            s1_x2 <= 10'd0; s1_y2 <= 10'd0;
-            s1_pixel_x <= 4'd0; s1_pixel_y <= 4'd0;
-            s1_tile_index <= 8'd0;
-
-            s2_x2 <= 10'd0; s2_y2 <= 10'd0;
-            s2_pixel_x <= 4'd0;
-            s2_spr_has_color <= 1'b0;
-
-            s3_spr_has_color <= 1'b0;
+            s0_x2 <= 10'd0;
+            s0_y2 <= 10'd0;
+            s0_pixel_x <= 4'd0;
+            s0_pixel_y <= 4'd0;
+            s1_tile_index_latch <= 8'd0;
 
             back_pal_index <= 5'd0;
             spr_pal_index  <= 5'd0;
-            rgb            <= 24'h000000;
-        end else begin
-            // --------------------------------------------------------
-            // Stage 3: final color from palette
-            // --------------------------------------------------------
-            v3 <= v2;
-            s3_spr_has_color <= s2_spr_has_color;
 
-            if (v3) begin
-                rgb <= s3_spr_has_color ? spr_pal_color : back_pal_color;
-            end else begin
-                rgb <= 24'h000000;
-            end
-
-            // --------------------------------------------------------
-            // Stage 2: pattern rows -> background + sprite overlay
-            // --------------------------------------------------------
-            v2 <= v1;
             s2_spr_has_color <= 1'b0;
 
-            if (v1) begin
-                s2_x2      <= s1_x2;
-                s2_y2      <= s1_y2;
-                s2_pixel_x <= s1_pixel_x;
+        end else begin
 
-                // *** Background bits directly from current RAM outputs ***
-                bit_idx_bg = 15 - s1_pixel_x;
-                back_pal_index <= (PPUCTRL[7:2] << 2) +
-                                  { ram_q_a[bit_idx_bg], ram_q_b[bit_idx_bg] };
-
-                // -------- Sprites over this pixel ----------
-                spr_has_color_now  <= 1'b0;
-                spr_pal_index_next <= 5'd0;
-
-                for (si = 0; si < 64; si = si + 1) begin
-                    base_idx = si << 2;
-
-                    spr_x = OAM[base_idx + 0];
-                    spr_y = OAM[base_idx + 1];
-
-                    if (!spr_has_color_now &&
-                        ((spr_x != 8'd0) || (spr_y != 8'd0)) &&
-                        (s1_x2 >= spr_x) && (s1_x2 <= spr_x + 8'd15) &&
-                        (s1_y2 >= spr_y) && (s1_y2 <= spr_y + 8'd15)) begin
-
-                        spr_tile         = OAM[base_idx + 2];
-                        spr_pal_base_now = OAM[base_idx + 3][4:0];
-
-                        spr_row = s1_y2 - spr_y;
-                        spr_col = s1_x2 - spr_x;
-
-                        spr_addr = (spr_tile << 4) + spr_row;
-                        spr_row0 = spr_plane0_rom[spr_addr];
-                        spr_row1 = spr_plane1_rom[spr_addr];
-
-                        bit_idx_spr       = spr_col; // LSB = leftmost
-                        spr_pattern_now[0] = spr_row0[bit_idx_spr];
-                        spr_pattern_now[1] = spr_row1[bit_idx_spr];
-
-                        if (spr_pattern_now != 2'b00) begin
-                            spr_has_color_now  <= 1'b1;
-                            spr_pal_index_next <= (spr_pal_base_now << 2) + spr_pattern_now;
-                        end
-                    end
-                end
-
-                s2_spr_has_color <= spr_has_color_now;
-                spr_pal_index    <= spr_pal_index_next;
-            end
-
-            // --------------------------------------------------------
-            // Stage 1: tile index + pattern row address
-            // --------------------------------------------------------
+            // Stage 2: Final Color Latch (RGB)
+            v2 <= v1;
+            rgb <= final_color_mux; // Latch the combinatorial final MUX output
+            
+            // Stage 1: Pattern Fetch & Sprite Overlay
+            // Reads from RAM, determines 2-bit patterns, calculates 5-bit palette indices.
             v1 <= v0;
+            s1_x2      <= s0_x2;
+            s1_y2      <= s0_y2;
+            s1_pixel_x <= s0_pixel_x;
 
-            if (v0) begin
-                s1_x2       <= s0_x2;
-                s1_y2       <= s0_y2;
-                s1_pixel_x  <= s0_pixel_x;
-                s1_pixel_y  <= s0_pixel_y;
+            // **BACKGROUND LOGIC**
+            
+            // Calculate bit index (15 for left-most pixel)
+            bit_idx_bg = 15 - s1_pixel_x;
 
-                // compute nametable word and tile index
-                nt_addr_s0 = 12'd2000 +
-                             (s0_tile_y * 10) +
-                             (s0_tile_x >> 1);
-                nt_word = nt_mem[nt_addr_s0];
+            // Extract the 2-bit background pattern from the PPU RAM
+            back_pattern_now[0] <= ram_q_a[bit_idx_bg];
+            back_pattern_now[1] <= ram_q_b[bit_idx_bg];
 
-                if (s0_tile_x[0])
-                    tile_idx_now = nt_word[7:0];
-                else
-                    tile_idx_now = nt_word[15:8];
+            // Latch 5-bit background palette index for S2
+            // PPUCTRL[7:2] = Palette Base + back_pattern_now
+            back_pal_index <= (PPUCTRL[7:2] << 2) | back_pattern_now;
+            
+            
+            // **SPRITE LOGIC**
 
-                s1_tile_index <= tile_idx_now;
+            // Sprite rendering logic (simplified for single sprite 0)
+            spr_x <= OAM[4*0 + 0]; // X coordinate
+            spr_y <= OAM[4*0 + 1]; // Y coordinate
+            
+            // OAM[4*0 + 2] is Pattern Index
+            // OAM[4*0 + 3] is Attribute Byte (contains palette base)
+            
+            // Check if current pixel is inside the 16x16 sprite area
+            if (s1_x2 >= spr_x && s1_x2 < spr_x + 16 && 
+                s1_y2 >= spr_y && s1_y2 < spr_y + 16) 
+            begin
+                // Calculate position within sprite tile (0..15)
+                spr_col = s1_x2 - spr_x;
+                spr_row = s1_y2 - spr_y;
+                
+                // Address offset for 16x16 sprite
+                spr_addr_rom = OAM[4*0 + 2] * ROWS_PER_TILE + spr_row;
+                
+                // Get bit index (15 for left-most pixel)
+                bit_idx_spr = 15 - spr_col;
 
-                // row address for both planes
-                row_addr   = (tile_idx_now << 4) + s0_pixel_y;
-                ram_addr_b <= PLANE0_BASE + row_addr;   // plane0
-                ram_addr_a <= PLANE1_BASE + row_addr;   // plane1
+                // Sprite Pattern Fetch (combinatorial from ROMs)
+                spr_row0 <= spr_plane0_rom[spr_addr_rom];
+                spr_row1 <= spr_plane1_rom[spr_addr_rom];
+
+                // Extract pattern bits: {Plane 1, Plane 0}
+                spr_pattern_now[0] <= spr_row0[bit_idx_spr];
+                spr_pattern_now[1] <= spr_row1[bit_idx_spr];
+
+                // Check for transparency (pattern 00 is transparent)
+                spr_has_color_now <= (spr_pattern_now != 2'b00);
+                
+                // Calculate the 5-bit sprite palette index
+                spr_pal_base_now <= OAM[4*0 + 3]; 
+                spr_pal_index_next <= (spr_pal_base_now[4:2] << 2) | spr_pattern_now; // Using bits [4:2] as palette base
+                
+            end else begin
+                // No sprite hit
+                spr_has_color_now <= 1'b0;
+                spr_pal_index_next <= 5'd0; 
             end
 
-            // --------------------------------------------------------
-            // Stage 0: latch coords
-            // --------------------------------------------------------
+            // Latch sprite collision state and palette index for S2
+            s2_spr_has_color <= spr_has_color_now;
+            spr_pal_index <= spr_pal_index_next;
+            
+            
+            // Stage 0: Latch Coordinates & Address Calculation
+            // Calculates nametable address and loads Pattern RAM addresses for S1.
             v0 <= rendering;
-            if (rendering) begin
-                s0_x2      <= x2;
-                s0_y2      <= y2;
-                s0_tile_x  <= tile_x;
-                s0_tile_y  <= tile_y;
-                s0_pixel_x <= pixel_x;
-                s0_pixel_y <= pixel_y;
-            end
+
+            s0_x2      <= x2;
+            s0_y2      <= y2;
+            s0_pixel_x <= pixel_x;
+            s0_pixel_y <= pixel_y;
+            
+            // Latch the calculated tile index
+            s1_tile_index_latch <= tile_idx_calc;
+
+            // Background Pattern address calculation
+            // This uses the *current* coordinate's tile index and row-in-tile (pixel_y)
+            row_addr_ram = tile_idx_calc * ROWS_PER_TILE + pixel_y;
+            
+            // Latch pattern RAM addresses for S1
+            ram_addr_a <= PLANE0_BASE + row_addr_ram;
+            ram_addr_b <= PLANE1_BASE + row_addr_ram;
         end
     end
 
