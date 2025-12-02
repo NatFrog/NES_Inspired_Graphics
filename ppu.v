@@ -1,6 +1,5 @@
-// ppu.v -- Background + sprite renderer with 16x16 tiles, 2 planes.
+// ppu.v -- Background + sprite renderer with 20x15 tiles, 2 planes.
 // -Currently sprites can move and are rendered without stretch.
-// -Background tiles are rendered but look stretched from 20x15 tile resolution
 
 module ppu (
     input  wire        clk,
@@ -19,11 +18,13 @@ module ppu (
     input  wire [9:0]  hCount,
     input  wire [9:0]  vCount,
 
-    // Declared as 'reg' because it is driven procedurally (in the always block)
+    // Declared as 'reg' because it is driven in an always block
     output reg  [23:0] rgb
 );
 
     // PPU pattern RAM (background patterns only)
+	 // Can be written to in order to add more backgrounds background tile patterns without changing
+	 // the sprite data in the ROMS.
     reg  [11:0] ram_addr_a, ram_addr_b;
     wire [15:0] ram_q_a, ram_q_b; // Pattern data from PPU RAM
 
@@ -40,6 +41,7 @@ module ppu (
     );
 
     // Nametable ROM
+	 // Used by sprites for fast rendering
     reg [15:0] nt_mem [0:4095];
 
     integer nt_i;
@@ -50,6 +52,7 @@ module ppu (
     end
 
     // OAM storage and CPU interface
+	 // Would classically be external- Future improvement.
     reg  [7:0]  OAM [0:255];
     reg  [31:0] oam_read_data;
     wire [7:0]  cpu_byte_index = { cpu_oam_addr, 2'b00 }; // object index * 4
@@ -98,6 +101,12 @@ module ppu (
     wire [4:0] tile_x, tile_y;
     wire [3:0] pixel_x, pixel_y;
 
+	 
+	 /*  To acheive a pixelated style reminiscent of the NES, we downscale the VGA's
+	 *  minimum resolution of 640x480 . Making it so our PPU interprets pixel h/vCounts
+	 *  within the range of 320x240. Thus, with 16x16 pixel tiles we have 20 horixonal
+	 *  tiles (tile_x) and 15 vertical tiles (tile_y).
+	 */
     assign x2      = hCount >> 1;
     assign y2      = vCount >> 1;
     assign tile_x  = x2[8:4];    // 0..19 (320 / 16)
@@ -110,6 +119,7 @@ module ppu (
     localparam integer PLANE1_BASE   = 12'd1000;
 
     // Sprite pattern ROMs
+	 // ***CAN MAKE SMALLER **
     reg [15:0] spr_plane0_rom [0:4095];
     reg [15:0] spr_plane1_rom [0:4095];
 
@@ -272,7 +282,7 @@ module ppu (
                 
                 // Calculate the 5-bit sprite palette index
                 spr_pal_base_now <= OAM[4*0 + 3]; 
-                spr_pal_index_next <= (spr_pal_base_now[4:2] << 2) | spr_pattern_now; // Using bits [4:2] as palette base
+                spr_pal_index_next <= (spr_pal_base_now << 2) +spr_pattern_now; // Using bits [4:2] as palette base
                 
             end else begin
                 // No sprite hit
