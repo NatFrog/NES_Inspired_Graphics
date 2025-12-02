@@ -42,15 +42,16 @@ module ppu (
         .q_a(ram_q_a),
         .q_b(ram_q_b)
     );
-
-    // Nametable ROM
-    reg [15:0] nt_mem [0:4095];
+	 
+	 
+    // Nametable ROM - make 2000 addresses
+    reg [15:0] nt_mem [0:2000];
 
     integer nt_i;
     initial begin
-        for (nt_i = 0; nt_i < 4096; nt_i = nt_i + 1)
+        for (nt_i = 0; nt_i < 2000; nt_i = nt_i + 1)
             nt_mem[nt_i] = 16'h0000;
-        $readmemh("ppu_ram_data.hex", nt_mem, 2000);
+        $readmemh("ppu_ram_data.hex", nt_mem, 0);
     end
 
     // OAM storage and CPU interface
@@ -188,7 +189,7 @@ module ppu (
     // Combinatorial Logic Block 1 (Nametable & Final Color MUX)
     always @(*) begin // Combinatorial block for address calculations
         // Nametable address for S0
-        nt_addr_calc = 12'd2000 + (tile_y * 10) + (tile_x >> 1);
+        nt_addr_calc = (tile_y * 10) + (tile_x >> 1);
         nt_word_data = nt_mem[nt_addr_calc];
         
         // Determine which of the two tile indices in nt_word_data to use
