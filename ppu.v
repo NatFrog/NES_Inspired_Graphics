@@ -122,12 +122,12 @@ module ppu (
 
 
     // Sprite pattern ROMs
-    reg [15:0] spr_plane0_rom [0:4095];
-    reg [15:0] spr_plane1_rom [0:4095];
+    reg [15:0] spr_plane0_rom [0:1000];
+    reg [15:0] spr_plane1_rom [0:1000];
 
     integer k;
     initial begin
-        for (k = 0; k < 4096; k = k + 1) begin
+        for (k = 0; k < 1000; k = k + 1) begin
             spr_plane0_rom[k] = 16'h0000;
             spr_plane1_rom[k] = 16'h0000;
         end
