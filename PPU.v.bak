@@ -3,7 +3,6 @@
  * What needs to be added to make sure it can interface with VGA?
  *Clock timing...
  */
-
 module PPU (
     input  wire        clk,            // PPU system clock
     input  wire        rst,            // Active-low reset
@@ -349,5 +348,6 @@ module PPU (
             scanline_count <= scanline_count + 1;
         end
     end
+
 
 endmodule
