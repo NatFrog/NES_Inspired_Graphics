@@ -1,3 +1,11 @@
+/* 2-Port palette Ram
+*  Stores 8 palettes at a time. Each palette contains a set of 4 colors. Each color is 3 Bytes.
+*  Each byte of the color represents an RGB Value.
+*
+* Note: This palette ram was designed to be written to but in our simple game approcah this 
+* functionality is unused. Thus, the palette colors used by BongoTron are preloaded.
+*/
+
 module ppu_palette(
     input        clk,
     input  [4:0] pal_addr_a, 
@@ -12,37 +20,44 @@ module ppu_palette(
     reg [23:0] color_a, color_b;
 
     initial begin
-        // You can adjust these, but at least they’re valid 24-bit colors now.
+		  // 0
         palette_mem[0]  = 24'h9df732;  // pink!
         palette_mem[1]  = 24'h000000;  // sandswept hair
         palette_mem[2]  = 24'h6CC6D4;  // ManCity blue
         palette_mem[3]  = 24'hf23535;  // flesh
 
-        // the rest just some gradients so you see *something*
-        palette_mem[4]  = 24'hA152D9;
-        palette_mem[5]  = 24'h37B046;
-        palette_mem[6]  = 24'h303030;
-        palette_mem[7]  = 24'h404040;
+        // 1 Sans
+        palette_mem[4]  = 24'hA152D9; //ignored for sprites
+        palette_mem[5]  = 24'h000000; //black
+        palette_mem[6]  = 24'h339ab8; //blue
+        palette_mem[7]  = 24'hf2f2f2; //white
+		  
+		  // etc.
         palette_mem[8]  = 24'h505050;
         palette_mem[9]  = 24'h606060;
         palette_mem[10] = 24'h707070;
         palette_mem[11] = 24'h808080;
+		  
         palette_mem[12] = 24'h909090;
         palette_mem[13] = 24'hA0A0A0;
         palette_mem[14] = 24'hB0B0B0;
         palette_mem[15] = 24'hC0C0C0;
+		  
         palette_mem[16] = 24'h00FF00;
         palette_mem[17] = 24'h0000FF;
         palette_mem[18] = 24'hFFFF00;
         palette_mem[19] = 24'hFF00FF;
+		  
         palette_mem[20] = 24'h00FFFF;
         palette_mem[21] = 24'h884400;
         palette_mem[22] = 24'h448800;
         palette_mem[23] = 24'h004488;
+		  
         palette_mem[24] = 24'h888888;
         palette_mem[25] = 24'hAA0000;
         palette_mem[26] = 24'h00AA00;
         palette_mem[27] = 24'h0000AA;
+		  
         palette_mem[28] = 24'hAAAA00;
         palette_mem[29] = 24'hAA00AA;
         palette_mem[30] = 24'h00AAAA;
