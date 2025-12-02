@@ -1,5 +1,10 @@
-// ppu.v -- Background + sprite renderer with 20x15 tiles, 2 planes.
-// -Currently sprites can move and are rendered without stretch.
+
+// ppu.v -- Background + sprite renderer with 16x16 pixel tiles, 2 planes.
+//
+// Backgrounds are 20x15 tiles
+// Can Display up to 64 sprites at once with 
+// Working Version: -Size of ROMs will be shrunk to only 2000 addresses. 
+//                  -Rename input files and fix assembler to output the 3 needed files
 
 module ppu (
     input  wire        clk,
@@ -14,17 +19,15 @@ module ppu (
 
     input  wire [7:0]  PPUCTRL,        // bits [1:0]=nametable (ignored), [7:2]=palette base
 
-    // VGA scan counters
+    // VGA scan counters -pixel coordinate
     input  wire [9:0]  hCount,
     input  wire [9:0]  vCount,
 
-    // Declared as 'reg' because it is driven in an always block
     output reg  [23:0] rgb
 );
 
+
     // PPU pattern RAM (background patterns only)
-	 // Can be written to in order to add more backgrounds background tile patterns without changing
-	 // the sprite data in the ROMS.
     reg  [11:0] ram_addr_a, ram_addr_b;
     wire [15:0] ram_q_a, ram_q_b; // Pattern data from PPU RAM
 
@@ -41,7 +44,6 @@ module ppu (
     );
 
     // Nametable ROM
-	 // Used by sprites for fast rendering
     reg [15:0] nt_mem [0:4095];
 
     integer nt_i;
@@ -52,7 +54,6 @@ module ppu (
     end
 
     // OAM storage and CPU interface
-	 // Would classically be external- Future improvement.
     reg  [7:0]  OAM [0:255];
     reg  [31:0] oam_read_data;
     wire [7:0]  cpu_byte_index = { cpu_oam_addr, 2'b00 }; // object index * 4
@@ -118,8 +119,8 @@ module ppu (
     localparam integer PLANE0_BASE   = 12'd0;
     localparam integer PLANE1_BASE   = 12'd1000;
 
+
     // Sprite pattern ROMs
-	 // ***CAN MAKE SMALLER **
     reg [15:0] spr_plane0_rom [0:4095];
     reg [15:0] spr_plane1_rom [0:4095];
 
@@ -148,43 +149,43 @@ module ppu (
 
     // Stage 2 -> Output latch (The output 'rgb' is already the final latch)
     
-    // Intermediate Variables
+    // Intermediate Variables -write defs in comments
     integer bit_idx_bg;
     integer spr_addr_rom;
     integer row_addr_ram;
-    integer bit_idx_spr;        
+    integer bit_idx_spr;        // For sprite pixel indexing
+    integer spr_oam_idx;        // Loop counter for sprite search
 
     reg [1:0] back_pattern_now; // The calculated 2-bit background pattern
     reg [1:0] spr_pattern_now;  // The calculated 2-bit sprite pattern
     reg        spr_has_color_now;
     reg [4:0]  spr_pal_index_next;
 
+    // Registers to hold the attributes of the WINNING sprite (latched from combinatorial block)
     reg [7:0]  spr_x, spr_y;
     reg [3:0]  spr_row, spr_col;
     
-    reg [15:0] spr_row0;         
-    reg [15:0] spr_row1;         
-    reg [7:0]  spr_pal_base_now; 
+    reg [15:0] spr_row0;         // Sprite plane 0 pattern data
+    reg [15:0] spr_row1;         // Sprite plane 1 pattern data
+    reg [7:0]  spr_pal_base_now; // Sprite palette attribute byte from OAM
 
     // Combinatorial Calculation Wires
     reg [11:0] nt_addr_calc;
     reg [15:0] nt_word_data;
     reg [7:0]  tile_idx_calc;
 
+    // Combinatorial results of the sprite priority search
+    reg [7:0] winner_spr_x_comb;
+    reg [7:0] winner_spr_y_comb;
+    reg [7:0] winner_spr_tile_idx_comb;
+    reg [7:0] winner_spr_palette_byte_comb;
+    reg winner_spr_hit_comb;
+
     // **NEW WIRE**: Combinatorial output of the S2 color MUX (Verilog-2001 compatible)
     wire [23:0] final_color_mux;
 
-
-    // Combinatorial Logic Block (Final Color MUX)
-    // Assigns the final color based on the registered state of Stage 2 (v2 and s2_spr_has_color)
-    assign final_color_mux = v2 ?
-                              // If S2 is valid: use sprite color if non-transparent, else use background color
-                              (s2_spr_has_color ? spr_pal_color : back_pal_color) :
-                              // If S2 is not valid (border/blanking), output black
-                              24'h000000;
-
-
-    // Main Pipeline Logic
+	 
+    // Combinatorial Logic Block 1 (Nametable & Final Color MUX)
     always @(*) begin // Combinatorial block for address calculations
         // Nametable address for S0
         nt_addr_calc = 12'd2000 + (tile_y * 10) + (tile_x >> 1);
@@ -197,6 +198,51 @@ module ppu (
             tile_idx_calc = nt_word_data[7:0];
     end
 
+    // Assigns the final color based on the registered state of Stage 2 (v2 and s2_spr_has_color)
+    assign final_color_mux = v2 ?
+                              // If S2 is valid: use sprite color if non-transparent, else use background color
+                              (s2_spr_has_color ? spr_pal_color : back_pal_color) :
+                              // If S2 is not valid (border/blanking), output black
+                              24'h000000;
+                              
+    // Combinatorial Logic Block 2: Sprite Search FIRST-HIT WINS
+    always @(*) begin
+      
+        reg [7:0] current_spr_x;
+        reg [7:0] current_spr_y;
+        integer spr_oam_idx_comb; // Local integer for combinatorial loop
+
+        // Initialize combinatorial results to 'no hit' state
+        winner_spr_hit_comb = 1'b0; // Start assuming no sprite hits the pixel
+        winner_spr_x_comb = 8'd0;
+        winner_spr_y_comb = 8'd0;
+        winner_spr_tile_idx_comb = 8'd0;
+        winner_spr_palette_byte_comb = 8'd0;
+
+        // Loop through all 64 sprites. Blocking assignments are fine here.
+        for (spr_oam_idx_comb = 0; spr_oam_idx_comb < 64; spr_oam_idx_comb = spr_oam_idx_comb + 1) begin
+            
+            // Read current sprite's position from OAM
+            current_spr_x = OAM[4*spr_oam_idx_comb + 0];
+            current_spr_y = OAM[4*spr_oam_idx_comb + 1];
+
+            // Check for collision at S1 pixel coordinates (using latched coordinates s1_x2, s1_y2)
+            if (s1_x2 >= current_spr_x && s1_x2 < current_spr_x + 16 && 
+                s1_y2 >= current_spr_y && s1_y2 < current_spr_y + 16) 
+            begin
+                // Use blocking assignments for combinatorial logic
+                // Since only one sprite can hit, update the winner registers directly.
+                winner_spr_hit_comb      = 1'b1;
+                winner_spr_x_comb        = current_spr_x;
+                winner_spr_y_comb        = current_spr_y;
+                winner_spr_tile_idx_comb = OAM[4*spr_oam_idx_comb + 2];
+                winner_spr_palette_byte_comb = OAM[4*spr_oam_idx_comb + 3];
+            end
+        end
+    end
+
+
+    // Sequential Logic Block (Main Pipeline)
     always @(posedge clk or negedge reset) begin
         if (!reset) begin
             v0 <= 1'b0;
@@ -218,6 +264,15 @@ module ppu (
             spr_pal_index  <= 5'd0;
 
             s2_spr_has_color <= 1'b0;
+            
+            spr_x <= 8'd0;
+            spr_y <= 8'd0;
+            spr_pal_base_now <= 8'd0;
+            spr_row0 <= 16'd0;
+            spr_row1 <= 16'd0;
+            spr_pattern_now <= 2'd0;
+            spr_has_color_now <= 1'b0;
+            spr_pal_index_next <= 5'd0;
 
         end else begin
 
@@ -242,29 +297,27 @@ module ppu (
             back_pattern_now[1] <= ram_q_b[bit_idx_bg];
 
             // Latch 5-bit background palette index for S2
-            // PPUCTRL[7:2] = Palette Base + back_pattern_now
-            back_pal_index <= (PPUCTRL[7:2] << 2) | back_pattern_now;
+            // PPUCTRL[7:5] provides the 3-bit Palette Base. Combine with 2-bit pattern.
+            back_pal_index <= {PPUCTRL[7:5], back_pattern_now};
             
             
-            // **SPRITE LOGIC**
+            // **SPRITE LOGIC (from Combinatorial Winner)**
 
-            // Sprite rendering logic (simplified for single sprite 0)
-            spr_x <= OAM[4*0 + 0]; // X coordinate
-            spr_y <= OAM[4*0 + 1]; // Y coordinate
-            
-            // OAM[4*0 + 2] is Pattern Index
-            // OAM[4*0 + 3] is Attribute Byte (contains palette base)
-            
-            // Check if current pixel is inside the 16x16 sprite area
-            if (s1_x2 >= spr_x && s1_x2 < spr_x + 16 && 
-                s1_y2 >= spr_y && s1_y2 < spr_y + 16) 
+            // Latch the combinatorial winner's attributes (non-blocking)
+            spr_x <= winner_spr_x_comb;
+            spr_y <= winner_spr_y_comb;
+            spr_pal_base_now <= winner_spr_palette_byte_comb;
+
+            // Use the winner's attributes to drive the pattern fetch logic
+            if (winner_spr_hit_comb) 
             begin
                 // Calculate position within sprite tile (0..15)
-                spr_col = s1_x2 - spr_x;
-                spr_row = s1_y2 - spr_y;
+                // Use the latched coordinates from Stage 0 (s1_x2, s1_y2) and the combinatorial winner's position
+                spr_col = s1_x2 - winner_spr_x_comb;
+                spr_row = s1_y2 - winner_spr_y_comb;
                 
                 // Address offset for 16x16 sprite
-                spr_addr_rom = OAM[4*0 + 2] * ROWS_PER_TILE + spr_row;
+                spr_addr_rom = winner_spr_tile_idx_comb * ROWS_PER_TILE + spr_row;
                 
                 // Get bit index (15 for left-most pixel)
                 bit_idx_spr = 15 - spr_col;
@@ -277,16 +330,16 @@ module ppu (
                 spr_pattern_now[0] <= spr_row0[bit_idx_spr];
                 spr_pattern_now[1] <= spr_row1[bit_idx_spr];
 
-                // Check for transparency (pattern 00 is transparent)
+                // Check for transparency (pattern 00 is transparent for sprites)
                 spr_has_color_now <= (spr_pattern_now != 2'b00);
                 
-                // Calculate the 5-bit sprite palette index
-                spr_pal_base_now <= OAM[4*0 + 3]; 
-                spr_pal_index_next <= (spr_pal_base_now << 2) +spr_pattern_now; // Using bits [4:2] as palette base
+                // Calculate the 5-bit sprite palette index 
+                // FIX: Assuming Attr byte [3:1] provides the 3-bit Palette Base. Combine with 2-bit pattern.
+                spr_pal_index_next <= winner_spr_palette_byte_comb*4+ spr_pattern_now; 
                 
             end else begin
                 // No sprite hit
-                spr_has_color_now <= 1'b0;
+                spr_has_color_now <= 1'b0; //hello friend
                 spr_pal_index_next <= 5'd0; 
             end
 
@@ -304,7 +357,7 @@ module ppu (
             s0_pixel_x <= pixel_x;
             s0_pixel_y <= pixel_y;
             
-            // Latch the calculated tile index
+            // **NAMETABLE FIX**: Latch the calculated tile index oh
             s1_tile_index_latch <= tile_idx_calc;
 
             // Background Pattern address calculation
